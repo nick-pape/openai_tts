@@ -36,6 +36,7 @@ from .const import (
     CONF_CHIME_SOUND,
     CONF_NORMALIZE_AUDIO,
     CONF_EXTRA_PAYLOAD,
+    CONF_RESPONSE_FORMAT,
     VOICES,
     MESSAGE_DURATIONS_KEY,
     CONF_PROFILE_NAME,
@@ -460,6 +461,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             CONF_NORMALIZE_AUDIO,
             CONF_INSTRUCTIONS,
             CONF_EXTRA_PAYLOAD,
+            CONF_RESPONSE_FORMAT,
         ]
 
     @property
@@ -697,12 +699,14 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             # Handle extra_payload for custom backends (service call overrides config)
             extra_payload = options.get(CONF_EXTRA_PAYLOAD) or self._get_config_value(CONF_EXTRA_PAYLOAD)
 
+            # Get configured response format
+            response_format = self._get_config_value(CONF_RESPONSE_FORMAT, "mp3")
+
             # Step 3: Determine if we can use streaming
             can_stream = self._can_use_streaming(full_text, options)
 
-            # Choose audio format - using mp3 for now as opus might have compatibility issues
-            # TODO: Re-enable opus once streaming is working properly
-            audio_format = "mp3"  # Was: "opus" if can_stream else "mp3"
+            # Use the configured audio format
+            audio_format = response_format
 
             _LOGGER.info("Streaming TTS - voice: %s, model: %s, speed: %s, format: %s, streaming: %s",
                         voice, model, speed, audio_format, can_stream)
@@ -764,7 +768,8 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
 
                         # Get processed audio using the existing method
                         audio_data = await self._get_processed_audio_for_streaming(
-                            full_text, request.language, options, voice, model, speed, instructions, extra_payload
+                            full_text, request.language, options, voice, model, speed, instructions, extra_payload,
+                            response_format=response_format
                         )
 
                         # Calculate and store duration for non-streaming audio
@@ -778,10 +783,11 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                         # Save to persistent storage
                         await self._save_persisted_state()
 
-                        # Embed duration in audio metadata for HA cache
-                        audio_data = await self.hass.async_add_executor_job(
-                            embed_duration_in_audio, audio_data, duration_ms
-                        )
+                        # Embed duration in audio metadata for HA cache (MP3 only)
+                        if response_format == "mp3":
+                            audio_data = await self.hass.async_add_executor_job(
+                                embed_duration_in_audio, audio_data, duration_ms
+                            )
 
                         # Yield in chunks for consistency
                         chunk_size = 8192
@@ -821,7 +827,8 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
         model: str,
         speed: float,
         instructions: str | None,
-        extra_payload: str | None = None
+        extra_payload: str | None = None,
+        response_format: str = "mp3"
     ) -> bytes:
         """Get processed audio for non-streaming cases.
 
@@ -845,6 +852,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                 model=model,
                 instructions=instructions,
                 extra_payload=extra_payload,
+                response_format=response_format,
                 stream=False  # Don't use streaming for processed audio
             )
         )
@@ -862,12 +870,15 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
 
         audio_data = audio_response.content
 
-        # Check if audio is WAV (some custom TTS backends return WAV instead of MP3)
-        is_wav = detect_audio_format(audio_data) == "wav"
+        # Detect actual format and determine if conversion is needed
+        detected_format = detect_audio_format(audio_data)
+        is_wav = detected_format == "wav"
+        needs_wav_conversion = is_wav and response_format != "wav"
 
-        # Process audio if needed (chime, normalization, or WAV conversion)
-        if chime_enable or normalize_audio or is_wav:
-            _LOGGER.debug("Processing audio with chime=%s, normalize=%s, is_wav=%s", chime_enable, normalize_audio, is_wav)
+        # Process audio if needed (chime, normalization, or unwanted WAV)
+        if chime_enable or normalize_audio or needs_wav_conversion:
+            _LOGGER.debug("Processing audio with chime=%s, normalize=%s, wav_convert=%s",
+                         chime_enable, normalize_audio, needs_wav_conversion)
 
             # Get chime file path
             chime_path = None
@@ -943,6 +954,9 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
         # Handle extra_payload for custom backends
         extra_payload = options.get(CONF_EXTRA_PAYLOAD)
 
+        # Get configured response format
+        response_format = self._get_config_value(CONF_RESPONSE_FORMAT, "mp3")
+
         # Audio processing options
         chime_enable = options.get(CONF_CHIME_ENABLE) or self._get_config_value(CONF_CHIME_ENABLE) or False
         chime_sound = options.get(CONF_CHIME_SOUND) or self._get_config_value(CONF_CHIME_SOUND)
@@ -973,9 +987,10 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                     message,
                     speed=speed,
                     voice=voice,
-                    model=model,  # Pass model parameter
+                    model=model,
                     instructions=instructions,
                     extra_payload=extra_payload,
+                    response_format=response_format,
                     stream=can_stream
                 )
             )
@@ -1015,13 +1030,19 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             # Save state to persistent storage
             await self._save_persisted_state()
 
-            # Check if audio is WAV (some custom TTS backends return WAV instead of MP3)
-            is_wav = detect_audio_format(audio_data) == "wav"
+            # Detect actual audio format from response
+            detected_format = detect_audio_format(audio_data)
+            is_wav = detected_format == "wav"
 
-            # Process audio if needed (chime, normalization, or WAV conversion)
-            if chime_enable or normalize_audio or is_wav:
-                _LOGGER.debug("Processing audio with chime=%s, normalize=%s, is_wav=%s", chime_enable, normalize_audio, is_wav)
-                
+            # Only convert WAV→MP3 if the user configured mp3 format
+            # When response_format is "wav", we keep WAV as-is
+            needs_wav_conversion = is_wav and response_format != "wav"
+
+            # Process audio if needed (chime, normalization, or unwanted WAV)
+            if chime_enable or normalize_audio or needs_wav_conversion:
+                _LOGGER.debug("Processing audio with chime=%s, normalize=%s, wav_convert=%s",
+                             chime_enable, normalize_audio, needs_wav_conversion)
+
                 # Get chime file path
                 chime_path = None
                 if chime_enable and chime_sound:
@@ -1030,7 +1051,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                     if not os.path.exists(chime_path):
                         _LOGGER.warning("Chime file not found: %s", chime_path)
                         chime_path = None
-                
+
                 # Process audio (it's already async)
                 _, processed_audio, _ = await process_audio(
                     self.hass,
@@ -1039,7 +1060,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                     chime_path=chime_path,
                     normalize_audio=normalize_audio
                 )
-                
+
                 if processed_audio:
                     audio_data = processed_audio
                     # Recalculate duration after processing and update cache
@@ -1052,17 +1073,23 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                 else:
                     _LOGGER.warning("Audio processing failed, using original audio")
 
-            # Embed duration in MP3 metadata using mutagen (for HA cache retrieval)
-            # This allows reading duration from cached audio files
-            audio_with_metadata = await self.hass.async_add_executor_job(
-                embed_duration_in_audio, audio_data, total_duration_ms
-            )
+            # Determine the final output format
+            if response_format == "wav":
+                # WAV format: skip MP3 metadata embedding, return as WAV
+                output_format = "wav"
+                final_audio = audio_data
+            else:
+                # MP3 format: embed duration in MP3 metadata using mutagen
+                output_format = "mp3"
+                final_audio = await self.hass.async_add_executor_job(
+                    embed_duration_in_audio, audio_data, total_duration_ms
+                )
 
             # Clear engine active flag before returning
             self._engine_active = False
             self.async_write_ha_state()
 
-            return ("mp3", audio_with_metadata)
+            return (output_format, final_audio)
             
         except MaxLengthExceeded as err:
             _LOGGER.error("Maximum message length exceeded: %s", err)

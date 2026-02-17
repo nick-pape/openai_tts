@@ -54,6 +54,7 @@
           "enable_instructions": "Enable custom instructions",
           "instructions": "Instructions (leave empty to disable)",
           "normalize_audio": "Enable loudness for generated audio (uses more CPU)",
+          "response_format": "Audio format (mp3 for OpenAI, wav for custom backends like PocketTTS)",
           "volume_restore": "Restore speaker volumes after TTS playback",
           "pause_playback": "Pause media during TTS (Sonos only)"
         }
@@ -80,7 +81,8 @@
             "chime_sound": "Chime sound",
             "normalize_audio": "Normalize audio volume",
             "instructions": "Custom instructions (optional, for supported models only)",
-            "extra_payload": "Extra JSON payload (optional, for custom TTS backends)"
+            "extra_payload": "Extra JSON payload (optional, for custom TTS backends)",
+            "response_format": "Audio format (mp3 for OpenAI, wav for custom backends like PocketTTS)"
           }
         },
         "reconfigure": {
@@ -94,7 +96,8 @@
             "chime_sound": "Chime sound",
             "normalize_audio": "Normalize audio volume",
             "instructions": "Custom instructions (optional, for supported models only)",
-            "extra_payload": "Extra JSON payload (optional, for custom TTS backends)"
+            "extra_payload": "Extra JSON payload (optional, for custom TTS backends)",
+            "response_format": "Audio format (mp3 for OpenAI, wav for custom backends like PocketTTS)"
           }
         }
       },

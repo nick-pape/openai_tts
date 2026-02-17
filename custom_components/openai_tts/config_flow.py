@@ -43,6 +43,8 @@ from .const import (
     CONF_VOLUME_RESTORE,
     CONF_PAUSE_PLAYBACK,
     CONF_PROFILE_NAME,
+    CONF_RESPONSE_FORMAT,
+    RESPONSE_FORMATS,
 )
 
 SUBENTRY_TYPE_PROFILE = "profile"
@@ -496,6 +498,12 @@ class OpenAITTSProfileSubentryFlow(ConfigSubentryFlow):
                     "suggested_value": ""
                 },
             ): TemplateSelector(),
+            vol.Optional(CONF_RESPONSE_FORMAT, default="mp3"): selector({
+                "select": {
+                    "options": RESPONSE_FORMATS,
+                    "mode": "dropdown",
+                }
+            }),
         })
 
         return self.async_show_form(
@@ -503,7 +511,7 @@ class OpenAITTSProfileSubentryFlow(ConfigSubentryFlow):
             data_schema=profile_schema,
             errors=errors,
         )
-    
+
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None) -> SubentryFlowResult:
         """Handle reconfiguration of a profile."""
         errors: dict[str, str] = {}
@@ -609,6 +617,12 @@ class OpenAITTSProfileSubentryFlow(ConfigSubentryFlow):
                     "suggested_value": existing_data.get(CONF_EXTRA_PAYLOAD) or ""
                 },
             ): TemplateSelector(),
+            vol.Optional(CONF_RESPONSE_FORMAT, default=existing_data.get(CONF_RESPONSE_FORMAT, "mp3")): selector({
+                "select": {
+                    "options": RESPONSE_FORMATS,
+                    "mode": "dropdown",
+                }
+            }),
         })
 
         return self.async_show_form(
@@ -753,6 +767,16 @@ class OpenAITTSOptionsFlow(OptionsFlow):
                 "normalize_audio",  # Use strings directly
                 default=self._config_entry.options.get(CONF_NORMALIZE_AUDIO, self._config_entry.data.get(CONF_NORMALIZE_AUDIO, False)),
             )] = selector({"boolean": {}})
+
+            schema_dict[vol.Optional(
+                CONF_RESPONSE_FORMAT,
+                default=self._config_entry.options.get(CONF_RESPONSE_FORMAT, self._config_entry.data.get(CONF_RESPONSE_FORMAT, "mp3")),
+            )] = selector({
+                "select": {
+                    "options": RESPONSE_FORMATS,
+                    "mode": "dropdown",
+                }
+            })
 
             # Instructions fields moved above after voice
 

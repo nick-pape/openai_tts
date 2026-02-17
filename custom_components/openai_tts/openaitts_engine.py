@@ -64,6 +64,7 @@ class OpenAITTSEngine:
         model: str | None = None,
         instructions: str | None = None,
         extra_payload: str | None = None,
+        response_format: str = "mp3",
         stream: bool = False,
         on_first_chunk: Optional[Callable[[], None]] = None
     ) -> Union[AudioResponse, StreamingAudioResponse]:
@@ -75,6 +76,7 @@ class OpenAITTSEngine:
             voice: Voice to use
             instructions: Optional instructions for the model
             extra_payload: JSON string with extra parameters to merge into the request
+            response_format: Audio format to request (mp3, wav, opus, etc.)
             stream: If True, returns StreamingAudioResponse for lower latency
             on_first_chunk: Callback when first chunk is received (streaming only)
         """
@@ -96,7 +98,7 @@ class OpenAITTSEngine:
             "model": model,
             "input": text,
             "voice": voice,
-            "response_format": "mp3",
+            "response_format": response_format,
             "speed": speed,
         }
         # Include instructions if provided
