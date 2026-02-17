@@ -44,7 +44,7 @@ async def async_get_config_entry_diagnostics(
     # Add TTS entity states
     tts_entities = []
     for state in hass.states.async_all("tts"):
-        if state.entity_id.startswith("tts.openai_tts"):
+        if state.entity_id.startswith("tts.openai_tts_fork"):
             tts_entities.append({
                 "entity_id": state.entity_id,
                 "state": state.state,

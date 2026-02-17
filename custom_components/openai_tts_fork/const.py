@@ -2,7 +2,7 @@
 Constants for OpenAI TTS custom component
 """
 
-DOMAIN = "openai_tts"
+DOMAIN = "openai_tts_fork"
 CONF_API_KEY = "api_key"
 CONF_MODEL = "model"
 CONF_VOICE = "voice"

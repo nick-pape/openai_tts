@@ -10,11 +10,11 @@ say:
       name: TTS Entity
       description: The TTS entity to use for text-to-speech.
       required: true
-      example: "tts.openai_tts_tts_1"
+      example: "tts.openai_tts_fork_tts_1"
       selector:
         entity:
           domain: tts
-          integration: openai_tts
+          integration: openai_tts_fork
     message:
       name: Message
       description: The text to be spoken.

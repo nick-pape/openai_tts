@@ -189,11 +189,11 @@ class OpenAITTSConfigFlow(ConfigFlow, domain=DOMAIN):
                 if api_key:
                     # Use API key hash for unique ID
                     api_key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:16]
-                    unique_id = f"openai_tts_{api_key_hash}"
+                    unique_id = f"openai_tts_fork_{api_key_hash}"
                 else:
                     # Use URL hash for custom endpoints without API key
                     url_hash = hashlib.sha256(api_url.encode()).hexdigest()[:16]
-                    unique_id = f"openai_tts_{url_hash}"
+                    unique_id = f"openai_tts_fork_{url_hash}"
 
                 user_input[UNIQUE_ID] = unique_id
                 await self.async_set_unique_id(unique_id)

@@ -217,7 +217,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
                 original_unique_id = f"{config_entry.data.get(CONF_URL)}_{model}"
             
             # Use just the model name as profile name to preserve entity ID
-            # This ensures tts.openai_tts_tts_1 instead of tts.openai_tts_default_tts_1
+            # This ensures tts.openai_tts_fork_tts_1 instead of tts.openai_tts_fork_default_tts_1
             profile_name = model
             
             subentry_data = {
@@ -301,7 +301,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up OpenAI TTS and register the openai_tts.say service."""
+    """Set up OpenAI TTS and register the openai_tts_fork.say service."""
     _LOGGER.debug("async_setup_entry called for %s (version %s.%s)",
                  entry.entry_id, entry.version, entry.minor_version)
     # Store entry for reference

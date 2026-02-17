@@ -157,7 +157,7 @@ def read_duration_from_audio(audio_data: bytes) -> int | None:
 
 # Storage version and key
 STORAGE_VERSION = 1
-STORAGE_KEY = "openai_tts_state"
+STORAGE_KEY = "openai_tts_fork_state"
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -314,20 +314,20 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             safe_profile_name = profile_name.lower().replace(" ", "_").replace("-", "_")
             # Remove any non-alphanumeric characters (except underscore)
             safe_profile_name = ''.join(c for c in safe_profile_name if c.isalnum() or c == '_')
-            self.entity_id = f"tts.openai_tts_{safe_profile_name}"
-            self._attr_name = f"OpenAI TTS {profile_name}"
+            self.entity_id = f"tts.openai_tts_fork_{safe_profile_name}"
+            self._attr_name = f"OpenAI TTS (Fork) {profile_name}"
         else:
             # This is the main entry or legacy entry
             # For legacy entries with model in data, use model in entity_id to make them unique
             if config.data.get(CONF_MODEL):
                 model_suffix = config.data.get(CONF_MODEL, "").replace("-", "_").replace(".", "_")
                 # Don't add unique suffix - keep entity_id stable for service calls
-                self.entity_id = f"tts.openai_tts_{model_suffix}"
-                self._attr_name = f"OpenAI TTS ({config.data.get(CONF_MODEL)})"
+                self.entity_id = f"tts.openai_tts_fork_{model_suffix}"
+                self._attr_name = f"OpenAI TTS Fork ({config.data.get(CONF_MODEL)})"
             else:
                 # New-style main entry
-                self.entity_id = "tts.openai_tts"
-                self._attr_name = "OpenAI TTS"
+                self.entity_id = "tts.openai_tts_fork"
+                self._attr_name = "OpenAI TTS (Fork)"
         
         # No custom cache needed - using HA's cache with embedded metadata
         
@@ -505,7 +505,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
         
         if not device_unique_id:
             # Fallback to URL-based unique ID
-            device_unique_id = self._config.data.get(CONF_URL, "openai_tts")
+            device_unique_id = self._config.data.get(CONF_URL, "openai_tts_fork")
         
         # Create device info
         device_info = {

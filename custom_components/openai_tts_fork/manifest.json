@@ -1,5 +1,5 @@
 {
-  "domain": "openai_tts",
+  "domain": "openai_tts_fork",
   "name": "OpenAI TTS (Forked)",
   "codeowners": [
     "@sfortis"
