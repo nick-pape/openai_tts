@@ -630,19 +630,12 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
     def _can_use_streaming(self, text: str, options: dict) -> bool:
         """Determine if streaming should be used.
 
-        Streaming is beneficial for:
-        - Long text responses (>60 chars)
-        - When no audio processing is needed
-        - When lower latency is desired
+        Streaming is used unless audio post-processing (chime, normalization)
+        is required, since those need the complete audio before processing.
         """
         # Don't stream if audio processing is needed
         if options.get(CONF_CHIME_ENABLE) or options.get(CONF_NORMALIZE_AUDIO):
             _LOGGER.debug("Streaming disabled: audio processing required")
-            return False
-
-        # Don't stream for very short messages
-        if len(text) < 60:
-            _LOGGER.debug("Streaming disabled: text too short (%d chars)", len(text))
             return False
 
         _LOGGER.debug("Streaming enabled for text with %d chars", len(text))
