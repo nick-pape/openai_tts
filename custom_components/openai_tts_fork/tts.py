@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import os
+import re
 from functools import partial
 from asyncio import CancelledError
 from datetime import datetime
@@ -49,6 +50,13 @@ from .utils import get_media_duration, process_audio, detect_audio_format
 from homeassistant.exceptions import MaxLengthExceeded
 
 _LOGGER = logging.getLogger(__name__)
+
+# Where a reply can be cut for sentence-by-sentence synthesis: . ! ? (plus any
+# closing quote/bracket) followed by whitespace, or a newline.
+SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+|\n+")
+# A streamed WAV response opens with a canonical 44-byte header; later
+# sentences drop theirs so the joined stream stays one valid WAV.
+WAV_HEADER_BYTES = 44
 
 # Metadata key for duration stored in MP3 ID3 tags
 DURATION_METADATA_KEY = "tts_duration_ms"
@@ -638,7 +646,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             _LOGGER.debug("Streaming disabled: audio processing required")
             return False
 
-        _LOGGER.debug("Streaming enabled for text with %d chars", len(text))
+        _LOGGER.debug("Streaming enabled")
         return True
 
     async def async_stream_tts_audio(
@@ -657,20 +665,9 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
         self.async_write_ha_state()
 
         try:
-            # Step 1: Accumulate text from the message generator
-            # OpenAI API doesn't support incremental text input, so we need to collect it all
-            full_text = ""
-            chunk_count = 0
-            async for text_chunk in request.message_gen:
-                full_text += text_chunk
-                chunk_count += 1
-                _LOGGER.debug("Received text chunk %d: %s...",
-                            chunk_count, text_chunk[:50] if len(text_chunk) > 50 else text_chunk)
-
-            _LOGGER.info("Accumulated %d text chunks, total length: %d chars",
-                        chunk_count, len(full_text))
-
-            # Step 2: Extract options and configuration
+            # Step 1: Extract options and configuration. The text itself is
+            # read inside audio_generator, so audio can start before the
+            # language model has finished writing.
             options = request.options or {}
 
             # Apply configuration defaults
@@ -695,18 +692,32 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             # Get configured response format
             response_format = self._get_config_value(CONF_RESPONSE_FORMAT, "mp3")
 
-            # Step 3: Determine if we can use streaming
-            can_stream = self._can_use_streaming(full_text, options)
+            # Step 2: Determine if we can use streaming
+            can_stream = self._can_use_streaming("", options)
 
             # Use the configured audio format
             audio_format = response_format
 
-            _LOGGER.info("Streaming TTS - voice: %s, model: %s, speed: %s, format: %s, streaming: %s",
-                        voice, model, speed, audio_format, can_stream)
+            # Sentence-by-sentence synthesis needs a format whose streams can
+            # be joined: mp3 frames concatenate as-is, and later WAV
+            # responses just drop their 44-byte header.
+            by_sentence = can_stream and audio_format in ("wav", "mp3")
 
-            # Step 4: Generate audio stream
+            _LOGGER.info("Streaming TTS - voice: %s, model: %s, speed: %s, format: %s, streaming: %s, by sentence: %s",
+                        voice, model, speed, audio_format, can_stream, by_sentence)
+
+            full_text = ""
+
+            async def read_all_text() -> str:
+                nonlocal full_text
+                async for text_chunk in request.message_gen:
+                    full_text += text_chunk
+                return full_text
+
+            # Step 3: Generate audio stream
             async def audio_generator() -> AsyncGenerator[bytes, None]:
                 """Generate audio chunks."""
+                nonlocal full_text
                 try:
                     if can_stream:
                         # Use streaming for low latency
@@ -714,17 +725,47 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
 
                         # Collect all chunks to calculate duration
                         all_chunks = []
-                        async for chunk in self._engine.async_get_tts_stream(
-                            text=full_text,
-                            response_format=audio_format,
-                            voice=voice,
-                            model=model,
-                            speed=speed,
-                            instructions=instructions,
-                            extra_payload=extra_payload
-                        ):
-                            all_chunks.append(chunk)
-                            yield chunk
+                        sentences = 0
+
+                        async def speak(text: str) -> AsyncGenerator[bytes, None]:
+                            nonlocal sentences
+                            skip = WAV_HEADER_BYTES if sentences and audio_format == "wav" else 0
+                            sentences += 1
+                            async for chunk in self._engine.async_get_tts_stream(
+                                text=text,
+                                response_format=audio_format,
+                                voice=voice,
+                                model=model,
+                                speed=speed,
+                                instructions=instructions,
+                                extra_payload=extra_payload
+                            ):
+                                if skip:
+                                    cut = min(skip, len(chunk))
+                                    chunk, skip = chunk[cut:], skip - cut
+                                    if not chunk:
+                                        continue
+                                all_chunks.append(chunk)
+                                yield chunk
+
+                        if by_sentence:
+                            pending = ""
+                            async for text_chunk in request.message_gen:
+                                full_text += text_chunk
+                                pending += text_chunk
+                                while (m := SENTENCE_END.search(pending)) is not None:
+                                    sentence, pending = pending[: m.end()], pending[m.end():]
+                                    if sentence.strip():
+                                        _LOGGER.debug("Speaking sentence %d: %s", sentences + 1, sentence.strip())
+                                        async for chunk in speak(sentence):
+                                            yield chunk
+                            if pending.strip():
+                                async for chunk in speak(pending):
+                                    yield chunk
+                        else:
+                            async for chunk in speak(await read_all_text()):
+                                yield chunk
+                        _LOGGER.info("Spoke %d chars in %d request(s)", len(full_text), sentences)
 
                         # Streaming is complete - calculate duration from complete audio
                         if all_chunks:
@@ -761,7 +802,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
 
                         # Get processed audio using the existing method
                         audio_data = await self._get_processed_audio_for_streaming(
-                            full_text, request.language, options, voice, model, speed, instructions, extra_payload,
+                            await read_all_text(), request.language, options, voice, model, speed, instructions, extra_payload,
                             response_format=response_format
                         )
 
