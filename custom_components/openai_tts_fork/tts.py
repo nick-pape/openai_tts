@@ -45,7 +45,7 @@ from .const import (
 )
 
 SUBENTRY_TYPE_PROFILE = "profile"
-from .convert import PREFERRED_OPTIONS, EdgeFade, WavPcm, convert_audio, convert_pcm_stream, target_from_options
+from .convert import PREFERRED_OPTIONS, EdgeFade, VoiceClarity, WavPcm, convert_audio, convert_pcm_stream, target_from_options
 from .openaitts_engine import OpenAITTSEngine, StreamingAudioResponse
 from .utils import get_media_duration, process_audio, detect_audio_format
 from homeassistant.exceptions import MaxLengthExceeded
@@ -68,6 +68,8 @@ FLUSH_SILENCE_S = 1.5
 # Each sentence is synthesized on its own and the pieces arrive back to back,
 # which runs them together; a breath between them sounds natural.
 SENTENCE_GAP_S = 0.35
+# Voices whose recordings get VoiceClarity (EQ and compression tuned for them).
+CLARITY_VOICES = {"snoop-dogg", "nickp"}
 
 # Metadata key for duration stored in MP3 ID3 tags
 DURATION_METADATA_KEY = "tts_duration_ms"
@@ -816,6 +818,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                             async def pcm() -> AsyncGenerator[tuple[int, int, bytes], None]:
                                 nonlocal sentences
                                 rate, channels, flushed = 24000, 1, True
+                                clarity = None  # one for the whole reply, so its filters run on across sentences
                                 async for text in spoken_texts(idle_ticks=True):
                                     if text is None:
                                         # Agent busy: keep audio flowing (see FLUSH_SILENCE_S).
@@ -834,6 +837,9 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                     ):
                                         if data := wav.feed(chunk):
                                             rate, channels = wav.sample_rate or rate, wav.channels or channels
+                                            if voice in CLARITY_VOICES and channels == 1:
+                                                clarity = clarity or VoiceClarity(rate)
+                                                data = clarity.process(data)
                                             fade = fade or EdgeFade(rate, channels)
                                             if data := fade.feed(data):
                                                 yield rate, channels, data

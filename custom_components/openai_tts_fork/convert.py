@@ -154,6 +154,74 @@ class Resampler:
         return np.clip(np.round(y), -32768, 32767).astype("<i2").tobytes()
 
 
+class VoiceClarity:
+    """EQ and compression for a dark, uneven voice (s16 mono, streaming).
+
+    Tuned by ear on the Cube's speaker for the snoop-dogg clone (liked on
+    nickp too), whose reference recording is muffled (almost no energy above
+    2 kHz) and swings in level: a bass cut below 80 Hz, +2 dB of body at
+    180 Hz, +3 dB of clarity at 2.8 kHz, +1.5 dB above 5 kHz, then 3:1
+    compression above -30 dBFS with make-up gain so soft syllables (sentence
+    starts) come up.
+    Filter state carries across chunks, so it works on streamed audio.
+    """
+
+    THRESHOLD_DB = -30.0
+    RATIO = 3.0
+    MAKEUP_DB = 10.0  # brings typical speech to about -18 dBFS
+
+    def __init__(self, rate: int) -> None:
+        from scipy.signal import butter, sosfilt_zi
+
+        def peaking(f0: float, gain_db: float, q: float) -> list[float]:
+            a = 10 ** (gain_db / 40)
+            w = 2 * math.pi * f0 / rate
+            al = math.sin(w) / (2 * q)
+            b0, b1, b2 = 1 + al * a, -2 * math.cos(w), 1 - al * a
+            a0, a1, a2 = 1 + al / a, -2 * math.cos(w), 1 - al / a
+            return [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]
+
+        def high_shelf(f0: float, gain_db: float) -> list[float]:
+            a = 10 ** (gain_db / 40)
+            w = 2 * math.pi * f0 / rate
+            al, cw, ra = math.sin(w) / 2 * math.sqrt(2), math.cos(w), math.sqrt(a)
+            b0 = a * ((a + 1) + (a - 1) * cw + 2 * ra * al)
+            b1 = -2 * a * ((a - 1) + (a + 1) * cw)
+            b2 = a * ((a + 1) + (a - 1) * cw - 2 * ra * al)
+            a0 = (a + 1) - (a - 1) * cw + 2 * ra * al
+            a1 = 2 * ((a - 1) - (a + 1) * cw)
+            a2 = (a + 1) - (a - 1) * cw - 2 * ra * al
+            return [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]
+
+        self.sos = np.vstack([
+            butter(2, 80, "hp", fs=rate, output="sos"),
+            [peaking(180, 2, 1.0), peaking(2800, 3, 0.9), high_shelf(5000, 1.5)],
+        ])
+        self.zi = sosfilt_zi(self.sos) * 0.0
+        # Level detector (10 ms) and gain smoothing (5 ms): one-pole filters.
+        self.env_k = 1 - math.exp(-1 / (0.010 * rate))
+        self.gain_k = 1 - math.exp(-1 / (0.005 * rate))
+        self.env_zi = np.zeros(1)
+        self.gain_zi = np.zeros(1)
+
+    def process(self, pcm: bytes) -> bytes:
+        from scipy.signal import lfilter, sosfilt
+
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.float64) / 32768
+        if not len(x):
+            return b""
+        y, self.zi = sosfilt(self.sos, x, zi=self.zi)
+        power, self.env_zi = lfilter([self.env_k], [1, self.env_k - 1], y * y, zi=self.env_zi)
+        level_db = 10 * np.log10(power + 1e-12)
+        cut_db = np.where(level_db > self.THRESHOLD_DB, (level_db - self.THRESHOLD_DB) * (1 / self.RATIO - 1), 0.0)
+        cut_db, self.gain_zi = lfilter([self.gain_k], [1, self.gain_k - 1], cut_db, zi=self.gain_zi)
+        y *= 10 ** ((cut_db + self.MAKEUP_DB) / 20)
+        # Soft limit above 0.9 instead of clipping.
+        over = np.abs(y) > 0.9
+        y[over] = np.sign(y[over]) * (0.9 + 0.1 * np.tanh((np.abs(y[over]) - 0.9) / 0.1))
+        return (y * 32767).astype("<i2").tobytes()
+
+
 class EdgeFade:
     """Fades a sentence's audio in and out (s16, interleaved).
 
