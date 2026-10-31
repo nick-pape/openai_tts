@@ -154,6 +154,49 @@ class Resampler:
         return np.clip(np.round(y), -32768, 32767).astype("<i2").tobytes()
 
 
+class EdgeFade:
+    """Fades a sentence's audio in and out (s16, interleaved).
+
+    The engine's audio for a sentence starts and stops wherever the waveform
+    happens to be, and the jump from there to the silence around it is an
+    audible click. The last FADE_OUT_S is held back until the sentence ends
+    so it can be faded.
+    """
+
+    FADE_IN_S = 0.005
+    FADE_OUT_S = 0.015
+
+    def __init__(self, rate: int, channels: int) -> None:
+        self.frame = 2 * channels
+        self.fade_in = int(rate * self.FADE_IN_S) * self.frame
+        self.hold = int(rate * self.FADE_OUT_S) * self.frame
+        self.done_in = 0  # bytes of the fade-in already applied
+        self.held = b""
+
+    def _ramp(self, data: bytes, start: int, total: int, up: bool) -> bytes:
+        x = np.frombuffer(data, dtype="<i2").astype(np.float32)
+        ch = self.frame // 2
+        n = len(x) // ch
+        pos = (start // self.frame + np.arange(n)) / max(1, total // self.frame)
+        gain = np.clip(pos if up else 1 - pos, 0, 1)
+        return (x.reshape(n, ch) * gain[:, None]).astype("<i2").tobytes()
+
+    def feed(self, data: bytes) -> bytes:
+        buf = self.held + data
+        if self.done_in < self.fade_in and buf:
+            n = min(len(buf), self.fade_in - self.done_in)
+            buf = self._ramp(buf[:n], self.done_in, self.fade_in, True) + buf[n:]
+            self.done_in += n
+        cut = max(0, len(buf) - self.hold)
+        cut -= cut % self.frame
+        self.held = buf[cut:]
+        return buf[:cut]
+
+    def end(self) -> bytes:
+        tail, self.held = self.held, b""
+        return self._ramp(tail, 0, len(tail), False) if tail else b""
+
+
 def _wav_header(rate: int, channels: int) -> bytes:
     """Streaming WAV header (unknown length), 16-bit PCM."""
     return (

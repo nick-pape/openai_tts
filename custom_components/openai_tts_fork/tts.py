@@ -45,7 +45,7 @@ from .const import (
 )
 
 SUBENTRY_TYPE_PROFILE = "profile"
-from .convert import PREFERRED_OPTIONS, WavPcm, convert_audio, convert_pcm_stream, target_from_options
+from .convert import PREFERRED_OPTIONS, EdgeFade, WavPcm, convert_audio, convert_pcm_stream, target_from_options
 from .openaitts_engine import OpenAITTSEngine, StreamingAudioResponse
 from .utils import get_media_duration, process_audio, detect_audio_format
 from homeassistant.exceptions import MaxLengthExceeded
@@ -827,14 +827,18 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                         yield rate, channels, bytes(int(rate * SENTENCE_GAP_S) * 2 * channels)
                                     flushed = False
                                     sentences += 1
-                                    wav = WavPcm()
+                                    wav, fade = WavPcm(), None
                                     async for chunk in self._engine.async_get_tts_stream(
                                         text=text, response_format="wav", voice=voice, model=model,
                                         speed=speed, instructions=instructions, extra_payload=extra_payload,
                                     ):
                                         if data := wav.feed(chunk):
                                             rate, channels = wav.sample_rate or rate, wav.channels or channels
-                                            yield rate, channels, data
+                                            fade = fade or EdgeFade(rate, channels)
+                                            if data := fade.feed(data):
+                                                yield rate, channels, data
+                                    if fade and (tail := fade.end()):
+                                        yield rate, channels, tail
 
                             async for chunk in convert_pcm_stream(pcm(), target):
                                 all_chunks.append(chunk)
