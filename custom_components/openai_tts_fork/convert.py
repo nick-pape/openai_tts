@@ -6,9 +6,13 @@ audio itself with ffmpeg, reading it as WAV, and ffmpeg's WAV reader holds
 back roughly the first 1.4 s of a live stream before emitting anything. That
 delay lands on every streamed voice reply.
 
-Supporting the options here avoids it: the engine's WAV is stripped to raw
-PCM and converted by an ffmpeg that is told the exact input format, so it
-skips probing and starts emitting within a fraction of a second.
+Supporting the options here avoids it. The engine's WAV is stripped to raw
+PCM; for WAV output (what voice satellites ask for) it is resampled here, so
+every sample goes out as soon as it arrives. That matters most for a short
+sentence spoken before a tool call: any ffmpeg stage holds a fraction of a
+second of audio until more arrives, which would keep "let me check on that"
+waiting until the tool has finished. Other formats go through an ffmpeg told
+the exact input format.
 """
 
 from __future__ import annotations
@@ -17,7 +21,10 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 import logging
+import math
 import struct
+
+import numpy as np
 
 from homeassistant.components.tts import (
     ATTR_PREFERRED_FORMAT,
@@ -104,6 +111,81 @@ class WavPcm:
         return data[:even]
 
 
+class Resampler:
+    """Streaming s16 mono resampler: low-pass FIR, then linear interpolation.
+
+    Stateful across chunks and emits every output sample it can compute from
+    the input so far; nothing is held back waiting for more audio.
+    """
+
+    def __init__(self, in_rate: int, out_rate: int) -> None:
+        self.step = in_rate / out_rate
+        if out_rate < in_rate:
+            # Windowed-sinc low-pass just under the new Nyquist frequency.
+            cutoff = 0.45 * out_rate / in_rate
+            n = np.arange(31) - 15
+            taps = 2 * cutoff * np.sinc(2 * cutoff * n) * np.hamming(31)
+            self.taps = (taps / taps.sum()).astype(np.float32)
+        else:
+            self.taps = None
+        self.history = np.zeros(0 if self.taps is None else len(self.taps) - 1, dtype=np.float32)
+        self.pos = 0.0  # next output position, in input samples, relative to `self.prev`
+        self.prev = np.zeros(0, dtype=np.float32)  # filtered input not yet fully consumed
+
+    def process(self, pcm: bytes) -> bytes:
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+        if self.taps is not None:
+            padded = np.concatenate([self.history, x])
+            self.history = padded[len(padded) - len(self.history):]
+            x = np.convolve(padded, self.taps, mode="valid").astype(np.float32)
+        buf = np.concatenate([self.prev, x])
+        if len(buf) < 2:
+            self.prev = buf
+            return b""
+        count = max(0, math.floor((len(buf) - 1 - self.pos) / self.step) + 1)
+        t = self.pos + self.step * np.arange(count)
+        i = np.floor(t).astype(np.int64)
+        frac = (t - i).astype(np.float32)
+        y = buf[i] * (1 - frac) + buf[np.minimum(i + 1, len(buf) - 1)] * frac
+        next_pos = self.pos + self.step * count
+        keep = int(math.floor(next_pos))
+        self.prev = buf[keep:]
+        self.pos = next_pos - keep
+        return np.clip(np.round(y), -32768, 32767).astype("<i2").tobytes()
+
+
+def _wav_header(rate: int, channels: int) -> bytes:
+    """Streaming WAV header (unknown length), 16-bit PCM."""
+    return (
+        b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt "
+        + struct.pack("<IHHIIHH", 16, 1, channels, rate, rate * channels * 2, channels * 2, 16)
+        + b"data" + struct.pack("<I", 0xFFFFFFFF)
+    )
+
+
+async def _wav_pcm_stream(
+    pcm: AsyncIterator[tuple[int, int, bytes]], target: Target
+) -> AsyncIterator[bytes]:
+    """16-bit WAV output, resampled here so audio leaves as soon as it arrives."""
+    resampler: Resampler | None = None
+    started = False
+    out_channels = target.channels or 1
+    async for rate, channels, data in pcm:
+        if channels != 1:  # down-mix to mono first
+            data = np.frombuffer(data, dtype="<i2").reshape(-1, channels).mean(axis=1).astype("<i2").tobytes()
+        if not started:
+            started = True
+            out_rate = target.sample_rate or rate
+            if out_rate != rate:
+                resampler = Resampler(rate, out_rate)
+            yield _wav_header(out_rate, out_channels)
+        out = resampler.process(data) if resampler else data
+        if out and out_channels == 2:
+            out = np.repeat(np.frombuffer(out, dtype="<i2"), 2).tobytes()
+        if out:
+            yield out
+
+
 def _ffmpeg_command(input_args: list[str], target: Target) -> list[str]:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", *input_args, "-i", "pipe:0"]
     if target.sample_rate:
@@ -120,8 +202,13 @@ async def convert_pcm_stream(
 ) -> AsyncIterator[bytes]:
     """Convert a stream of (sample_rate, channels, s16le PCM) to the target.
 
-    ffmpeg starts on the first chunk, once the input rate is known.
+    16-bit WAV is produced here directly; other formats use ffmpeg, started on
+    the first chunk once the input rate is known.
     """
+    if target.format == "wav" and target.sample_bytes in (None, 2):
+        async for chunk in _wav_pcm_stream(pcm, target):
+            yield chunk
+        return
     first = await anext(pcm, None)
     if first is None:
         return
