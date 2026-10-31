@@ -65,6 +65,9 @@ WAV_HEADER_BYTES = 44
 # of silence pushes it out, then silence follows in real time.
 IDLE_TICK_S = 0.1
 FLUSH_SILENCE_S = 1.5
+# Each sentence is synthesized on its own and the pieces arrive back to back,
+# which runs them together; a breath between them sounds natural.
+SENTENCE_GAP_S = 0.35
 
 # Metadata key for duration stored in MP3 ID3 tags
 DURATION_METADATA_KEY = "tts_duration_ms"
@@ -820,6 +823,8 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                         flushed = True
                                         yield rate, channels, bytes(int(rate * secs) * 2 * channels)
                                         continue
+                                    if sentences and not flushed:  # idle silence already made a gap
+                                        yield rate, channels, bytes(int(rate * SENTENCE_GAP_S) * 2 * channels)
                                     flushed = False
                                     sentences += 1
                                     wav = WavPcm()
