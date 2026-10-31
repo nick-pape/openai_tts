@@ -58,6 +58,13 @@ SENTENCE_END = re.compile(r"[.!?][\"'”’)\]]*\s+|\n+")
 # A streamed WAV response opens with a canonical 44-byte header; later
 # sentences drop theirs so the joined stream stays one valid WAV.
 WAV_HEADER_BYTES = 44
+# While the language model is busy (tool calls) after a sentence, satellite
+# audio keeps flowing as silence: Home Assistant converts it with an ffmpeg
+# whose WAV reader holds back about the last 1.4 s it was given, so a short
+# "let me check on that" would otherwise wait for the next sentence. A burst
+# of silence pushes it out, then silence follows in real time.
+IDLE_TICK_S = 0.1
+FLUSH_SILENCE_S = 1.5
 
 # Metadata key for duration stored in MP3 ID3 tags
 DURATION_METADATA_KEY = "tts_duration_ms"
@@ -758,21 +765,43 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                 all_chunks.append(chunk)
                                 yield chunk
 
-                        async def spoken_texts() -> AsyncGenerator[str, None]:
-                            """The reply, as sentences when they can be joined."""
+                        async def spoken_texts(idle_ticks: bool = False) -> AsyncGenerator[str | None, None]:
+                            """The reply, as sentences when they can be joined.
+
+                            With idle_ticks, yields None every IDLE_TICK_S while
+                            no text is arriving after a sentence has been spoken.
+                            """
                             nonlocal full_text
                             if not by_sentence:
                                 yield await read_all_text()
                                 return
                             pending = ""
-                            async for text_chunk in request.message_gen:
-                                full_text += text_chunk
-                                pending += text_chunk
-                                while (m := SENTENCE_END.search(pending)) is not None:
-                                    sentence, pending = pending[: m.end()], pending[m.end():]
-                                    if sentence.strip():
-                                        _LOGGER.debug("Speaking sentence %d: %s", sentences + 1, sentence.strip())
-                                        yield sentence
+                            spoke = False
+                            texts = aiter(request.message_gen)
+                            next_text = asyncio.ensure_future(anext(texts))
+                            try:
+                                while True:
+                                    if idle_ticks and spoke:
+                                        done, _ = await asyncio.wait({next_text}, timeout=IDLE_TICK_S)
+                                        if not done:
+                                            yield None
+                                            continue
+                                    try:
+                                        text_chunk = await next_text
+                                    except StopAsyncIteration:
+                                        break
+                                    next_text = asyncio.ensure_future(anext(texts))
+                                    full_text += text_chunk
+                                    pending += text_chunk
+                                    while (m := SENTENCE_END.search(pending)) is not None:
+                                        sentence, pending = pending[: m.end()], pending[m.end():]
+                                        if sentence.strip():
+                                            _LOGGER.debug("Speaking sentence %d: %s", sentences + 1, sentence.strip())
+                                            spoke = True
+                                            yield sentence
+                            finally:
+                                if not next_text.done():
+                                    next_text.cancel()
                             if pending.strip():
                                 yield pending
 
@@ -783,7 +812,15 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                         else:
                             async def pcm() -> AsyncGenerator[tuple[int, int, bytes], None]:
                                 nonlocal sentences
-                                async for text in spoken_texts():
+                                rate, channels, flushed = 24000, 1, True
+                                async for text in spoken_texts(idle_ticks=True):
+                                    if text is None:
+                                        # Agent busy: keep audio flowing (see FLUSH_SILENCE_S).
+                                        secs = IDLE_TICK_S if flushed else FLUSH_SILENCE_S
+                                        flushed = True
+                                        yield rate, channels, bytes(int(rate * secs) * 2 * channels)
+                                        continue
+                                    flushed = False
                                     sentences += 1
                                     wav = WavPcm()
                                     async for chunk in self._engine.async_get_tts_stream(
@@ -791,7 +828,8 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                         speed=speed, instructions=instructions, extra_payload=extra_payload,
                                     ):
                                         if data := wav.feed(chunk):
-                                            yield wav.sample_rate or 24000, wav.channels or 1, data
+                                            rate, channels = wav.sample_rate or rate, wav.channels or channels
+                                            yield rate, channels, data
 
                             async for chunk in convert_pcm_stream(pcm(), target):
                                 all_chunks.append(chunk)
