@@ -45,6 +45,7 @@ from .const import (
 )
 
 SUBENTRY_TYPE_PROFILE = "profile"
+from .convert import PREFERRED_OPTIONS, WavPcm, convert_audio, convert_pcm_stream, target_from_options
 from .openaitts_engine import OpenAITTSEngine, StreamingAudioResponse
 from .utils import get_media_duration, process_audio, detect_audio_format
 from homeassistant.exceptions import MaxLengthExceeded
@@ -470,6 +471,9 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             CONF_INSTRUCTIONS,
             CONF_EXTRA_PAYLOAD,
             CONF_RESPONSE_FORMAT,
+            # Producing the preferred format here keeps Home Assistant from
+            # converting it with an ffmpeg that delays live audio (convert.py).
+            *PREFERRED_OPTIONS,
         ]
 
     @property
@@ -698,13 +702,19 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
             # Use the configured audio format
             audio_format = response_format
 
+            # A caller's preferred format (a voice satellite's 16 kHz WAV, say)
+            # is produced from the engine's WAV via raw PCM; see convert.py.
+            target = target_from_options(options, audio_format)
+            if target is not None:
+                audio_format = "wav"
+
             # Sentence-by-sentence synthesis needs a format whose streams can
             # be joined: mp3 frames concatenate as-is, and later WAV
             # responses just drop their 44-byte header.
             by_sentence = can_stream and audio_format in ("wav", "mp3")
 
-            _LOGGER.info("Streaming TTS - voice: %s, model: %s, speed: %s, format: %s, streaming: %s, by sentence: %s",
-                        voice, model, speed, audio_format, can_stream, by_sentence)
+            _LOGGER.info("Streaming TTS - voice: %s, model: %s, speed: %s, format: %s, streaming: %s, by sentence: %s, target: %s",
+                        voice, model, speed, audio_format, can_stream, by_sentence, target)
 
             full_text = ""
 
@@ -748,7 +758,12 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                 all_chunks.append(chunk)
                                 yield chunk
 
-                        if by_sentence:
+                        async def spoken_texts() -> AsyncGenerator[str, None]:
+                            """The reply, as sentences when they can be joined."""
+                            nonlocal full_text
+                            if not by_sentence:
+                                yield await read_all_text()
+                                return
                             pending = ""
                             async for text_chunk in request.message_gen:
                                 full_text += text_chunk
@@ -757,13 +772,29 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                                     sentence, pending = pending[: m.end()], pending[m.end():]
                                     if sentence.strip():
                                         _LOGGER.debug("Speaking sentence %d: %s", sentences + 1, sentence.strip())
-                                        async for chunk in speak(sentence):
-                                            yield chunk
+                                        yield sentence
                             if pending.strip():
-                                async for chunk in speak(pending):
+                                yield pending
+
+                        if target is None:
+                            async for text in spoken_texts():
+                                async for chunk in speak(text):
                                     yield chunk
                         else:
-                            async for chunk in speak(await read_all_text()):
+                            async def pcm() -> AsyncGenerator[tuple[int, int, bytes], None]:
+                                nonlocal sentences
+                                async for text in spoken_texts():
+                                    sentences += 1
+                                    wav = WavPcm()
+                                    async for chunk in self._engine.async_get_tts_stream(
+                                        text=text, response_format="wav", voice=voice, model=model,
+                                        speed=speed, instructions=instructions, extra_payload=extra_payload,
+                                    ):
+                                        if data := wav.feed(chunk):
+                                            yield wav.sample_rate or 24000, wav.channels or 1, data
+
+                            async for chunk in convert_pcm_stream(pcm(), target):
+                                all_chunks.append(chunk)
                                 yield chunk
                         _LOGGER.info("Spoke %d chars in %d request(s)", len(full_text), sentences)
 
@@ -842,7 +873,7 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
 
             # Return the streaming response
             return TTSAudioResponse(
-                extension=audio_format,
+                extension=target.format if target is not None else audio_format,
                 data_gen=audio_generator()
             )
 
@@ -1118,6 +1149,10 @@ class OpenAITTSEntity(TextToSpeechEntity, RestoreEntity):
                 final_audio = await self.hass.async_add_executor_job(
                     embed_duration_in_audio, audio_data, total_duration_ms
                 )
+
+            if (target := target_from_options(options or {}, output_format)) is not None:
+                final_audio = await convert_audio(final_audio, output_format, target)
+                output_format = target.format
 
             # Clear engine active flag before returning
             self._engine_active = False
